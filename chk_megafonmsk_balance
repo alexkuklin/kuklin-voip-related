@@ -1,0 +1,75 @@
+#!/usr/bin/perl
+
+# icinga: -epn
+
+use strict;
+
+use Nagios::Plugin;
+
+use LWP::UserAgent;
+use Config::IniFiles;
+
+my $np = Nagios::Plugin->new(  
+     usage => "Usage: %s  "
+       . "[ -c|--critical=<threshold> ] [ -w|--warning=<threshold> ] -l|--login <login> -f|--conf <path-to-ini>",
+   );   
+
+   $np->add_arg(
+     spec => 'critical|c=s',
+     help => '-c, --critical=INTEGER:INTEGER .  See '
+       . 'http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT '
+       . 'for the threshold format. ',
+   );
+   $np->add_arg(
+     spec => 'warning|w=s',
+     help => '-w, --warning=INTEGER:INTEGER .  See '
+       . 'http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT '
+       . 'for the threshold format. ',
+   );
+   $np->add_arg(
+     spec => 'login|l=s',
+     help => '-l, --login=LOGIN .   '
+       . 'youmagic login '
+       . 'for the threshold format. ',
+   );
+   $np->add_arg(
+     spec => 'conf|f=s',
+     help => '-f, --conf=PATH Path to ini-file with passwords '
+   );
+
+   $np->getopts;
+
+my $cfg = new Config::IniFiles( -file => $np->opts->conf ) || $np->nagios_exit( UNKNOWN, "Unable to read config at ".$np->opts->conf) ;
+
+my $login = $np->opts->login;
+my $password = $cfg->val( 'megafonmsk', "password_$login" );
+
+my $agent = LWP::UserAgent->new(ssl_opts => { verify_hostname => 0 });
+push @{ $agent->requests_redirectable }, 'POST';
+$agent->cookie_jar({});
+
+
+my $url = 'https://www.serviceguide.megafonmoscow.ru/ROBOTS/SC_TRAY_INFO';
+my $response = $agent->post($url, [
+    'X_Username' => $login,
+    'X_Password' => $password
+]);
+
+$np->nagios_exit( UNKNOWN, "Unable to fetch response at $url, error: ".$response->status_line ) unless $response->is_success;
+
+# забираем баланс телефона
+$response->content =~ /<BALANCE>(.+?)<\/BALANCE>/;
+
+$np->nagios_exit( UNKNOWN, "Unable to get balance from answer, content was ".$response->content ) unless (defined $1);
+my $balance = $1;
+
+$np -> add_perfdata( label =>"balance", value =>  $balance , threshold => 0 );
+
+  $np->nagios_exit(
+        return_code => $np->check_threshold($balance),
+        message     => "Balance is $balance"
+  );
+
+
+END { unlink("/tmp/.cookies.$$.txt"); }
+

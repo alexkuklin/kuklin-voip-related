@@ -1,0 +1,91 @@
+#!/usr/bin/perl
+
+use strict;
+
+use Nagios::Plugin;
+
+use LWP::UserAgent;
+use Mojo::DOM;
+use Switch;
+use Config::IniFiles;
+
+
+my $np = Nagios::Plugin->new(  
+     usage => "Usage: %s  "
+       . "[ -c|--critical=<threshold> ] [ -w|--warning=<threshold> ] -l|--login <login> -f|--conf <path-to-ini>",
+   );   
+
+   $np->add_arg(
+     spec => 'critical|c=s',
+     help => '-c, --critical=INTEGER:INTEGER .  See '
+       . 'http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT '
+       . 'for the threshold format. ',
+   );
+   $np->add_arg(
+     spec => 'warning|w=s',
+     help => '-w, --warning=INTEGER:INTEGER .  See '
+       . 'http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT '
+       . 'for the threshold format. ',
+   );
+   $np->add_arg(
+     spec => 'login|l=s',
+     help => '-l, --login=LOGIN .   '
+       . 'youmagic login '
+       . 'for the threshold format. ',
+   );
+   $np->add_arg(
+     spec => 'conf|f=s',
+     help => '-f, --conf=PATH Path to ini-file with passwords '
+   );
+
+   $np->getopts;
+
+my $cfg = new Config::IniFiles( -file => $np->opts->conf ) || $np->nagios_exit( UNKNOWN, "Unable to read config at ".$np->opts->conf) ;
+
+my $login = $np->opts->login;
+my $password = $cfg->val( 'youmagic', "password_$login" );
+
+my $ua = LWP::UserAgent->new(cookie_jar => { file => "/tmp/.cookies.$$.txt" });
+
+my $response = $ua->get('https://www.youmagic.com/index.php?option=com_portabillinguser&view=login');
+
+my $dom = Mojo::DOM->new($response->decoded_content) || $np->nagios_exit( UNKNOWN, "Failed to parse login page") ;
+
+my %reqhash;
+
+my $form = $dom->find("#com-form-login") || $np->nagios_exit( UNKNOWN, "Failed to find login form") ;
+
+my @inputs = $form->[0]->find('input')->each;
+
+foreach my $input (@inputs)
+{
+	next unless $input->attrs->{name};
+	my $value = $input->attrs->{value};
+	$value = $login if ($input->attrs->{name} eq 'username');
+	$value = $password if ($input->attrs->{name} eq 'passwd');
+	
+	$reqhash{$input->attrs->{name}} = $value;
+}
+
+push @{ $ua->requests_redirectable }, 'POST';
+$response = $ua->post( 'https://www.youmagic.com/en/component/portabillinguser/', \%reqhash);
+$dom = Mojo::DOM->new($response->decoded_content);
+
+$np->nagios_exit( UNKNOWN, "Login failed") unless $dom->find("div#logout")->[0];
+
+$response = $ua->get( 'https://www.youmagic.com/en/account');
+
+$dom = Mojo::DOM->new($response->decoded_content);
+
+my $balancespan = $dom->find("div.balance-icon")->[0]->content_xml;
+my ($balance) = ( $balancespan =~ /(\d+\.\d\d) roubles/);
+$np -> add_perfdata( label =>"balance", value =>  $balance , threshold => 0 );
+
+  $np->nagios_exit(
+        return_code => $np->check_threshold($balance),
+        message     => "Balance is $balance"
+  );
+
+
+END { unlink("/tmp/.cookies.$$.txt"); }
+
